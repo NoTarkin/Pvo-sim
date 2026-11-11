@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>ТКП ПВО // Сектор-04</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+  body { background: #060908; color: #0f6; font-family: Consolas, monospace; display: flex; height: 100vh; overflow: hidden; }
+  #ui { width: 285px; background: #0a100d; border-right: 1px solid #1a3326; padding: 10px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+  .box { background: #0d1612; border: 1px solid #1a3326; padding: 7px; }
+  button { width: 100%; background: #0f1c16; border: 1px solid #264d3b; color: #0f6; padding: 5px 7px; text-align: left; cursor: pointer; font-family: inherit; margin-top: 4px; }
+  button.act { background: #1a3829; border-color: #0f6; }
+  #log { flex-grow: 1; overflow-y: auto; font-size: 11px; color: #7a8; display: flex; flex-direction: column-reverse; }
+  canvas { flex-grow: 1; display: block; cursor: crosshair; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <b>ПЛАНШЕТ ПВО // СЕКТОР-04</b>
+  <div class="box">Бюджет: <b id="m" style="color:#fa0">2500</b> | Сбито: <b id="k">0</b><br><span style="color:#0cf">Фаза: <b id="ph">1</b></span></div>
+  <div class="box" id="bases"></div>
+  <div class="box">
+    <div>ЛКМ — поставить | ПКМ — переезд:</div>
+    <button id="b0" class="act" onclick="sel('rls')"><b>РЛС (300)</b> [<span id="c0">0/2</span>] — Обзор 310</button>
+    <button id="b1" onclick="sel('reb')"><b>РЭБ (350)</b> [<span id="c1">0/2</span>] — Подавление БПЛА</button>
+    <button id="b2" onclick="sel('zrpk')"><b>ЗРПК (250)</b> [<span id="c2">0/4</span>] — Ближний (R110)</button>
+    <button id="b3" onclick="sel('zrk')"><b>ЗРК (550)</b> [<span id="c3">0/3</span>] — Дальний (R225)</button>
+    <button id="b4" onclick="buildNet()" style="border-color:#fa0;color:#fa0"><b>Сетка на НПЗ (400)</b> [<span id="net-st">НЕТ</span>]</button>
+    <button id="b5" onclick="repairBase()" style="border-color:#0cf;color:#0cf"><b>Ремонт объекта (300)</b></button>
+  </div>
+  <div class="box" id="log"></div>
+</div>
+<canvas id="c"></canvas>
+<script>
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+let w, h, money = 2500, kills = 0, type = 'rls', timer = 160, mx = -999, my = -999, over = false, phase = 1, incomeTick = 0, selUnit = null;
+const resize = () => { w = c.width = c.clientWidth; h = c.height = c.clientHeight; };
+window.onresize = resize; resize();
+
+const bases = [
+  {n:'КП Сектора', x:.25, y:.26, hp:100, rep:0},
+  {n:'Склад БК',   x:.75, y:.27, hp:100, rep:0},
+  {n:'Подстанция', x:.73, y:.74, hp:100, rep:0},
+  {n:'НПЗ',        x:.26, y:.73, hp:100, rep:0, isRefinery:1, hasNet:0}
+];
+const towns = [
+  {n:'Березовка', x:.44, y:.48, r:24, isTown:1},
+  {n:'Северный',  x:.62, y:.40, r:26, isTown:1},
+  {n:'Озерное',   x:.48, y:.66, r:22, isTown:1}
+];
+const forests = [{x:.36,y:.32,r:50},{x:.68,y:.54,r:60},{x:.54,y:.20,r:45},{x:.35,y:.64,r:45}];
+const units = [], foes = [], shots = [], booms = [];
+const SPECS = {
+  rls:  { k:'rls',  n:'РЛС',  cost:300, r:310, lim:2, col:'#0ff', rad:1 },
+  reb:  { k:'reb',  n:'РЭБ',  cost:350, r:130, lim:2, col:'#d0f', ew:1 },
+  zrpk: { k:'zrpk', n:'ЗРПК', cost:250, r:110, cd:65, sc:15, spd:3.2, max:12, rearm:210, lim:4, col:'#0f6', heavy:0 },
+  zrk:  { k:'zrk',  n:'ЗРК',  cost:550, r:225, cd:160, sc:80, spd:5.2, max:4, rearm:400, lim:3, col:'#0cf', heavy:1 }
+};
+const log = (t, col='#7a8') => { document.getElementById('log').innerHTML = `<div style="color:${col}">> ${t}</div>` + document.getElementById('log').innerHTML; };
+const sel = t => { type = t; ['rls','reb','zrpk','zrk'].forEach((k,i) => document.getElementById('b'+i).className = t===k?'act':''); };
+sel('rls');
+function buildNet() {
+  const npz = bases.find(b => b.isRefinery);
+  if (npz.hp <= 0) return log('НПЗ разрушен!', '#f33');
+  if (npz.hasNet) return log('Сетки уже установлены!', '#fa0');
+  if (money < 400) return log('Нужно 400 снабжения!', '#fa0');
+  money -= 400; npz.hasNet = 1; document.getElementById('net-st').textContent = 'ЕСТЬ (50%)';
+  log('ИНЖЕНЕРЫ: На НПЗ смонтированы сетки!', '#fa0');
+}
+
+function repairBase() {
+  if (over) return;
+  const damaged = bases.filter(b => b.hp < 100 && b.rep <= 0).sort((a,b) => a.hp - b.hp);
+  if (!damaged.length) return log('Нет зданий для ремонта!', '#fa0');
+  if (money < 300) return log('Нужно 300 очков на ремонт!', '#fa0');
+  money -= 300; const b = damaged;
+  b.rep = b.isRefinery ? 10800 : 7200;
+  log(`РЕМОНТ: Бригада на ${b.n} (${b.isRefinery?'3 мин':'2 мин'})`, '#0cf');
+}
+
+c.onmousemove = e => { const r = c.getBoundingClientRect(); mx = e.clientX - r.left; my = e.clientY - r.top; };
+c.onclick = () => {
+  if (over) return; const s = SPECS[type];
+  if (units.filter(u => u.s.k === type).length >= s.lim) return log(`Лимит ${s.n} (${s.lim})!`, '#fa0');
+  if (money < s.cost) return log('Нет ресурсов!', '#fa0');
+  money -= s.cost; units.push({ x:mx, y:my, tx:mx, ty:my, s, cd:0, ammo:s.max, re:0, u:1 }); log(`Развёрнут ${s.n}`, s.col);
+};
+c.oncontextmenu = e => {
+  e.preventDefault(); if (over) return;
+  const clicked = units.find(u => Math.hypot(u.x - mx, u.y - my) < 18);
+  if (clicked) { selUnit = clicked; log(`Выбран ${clicked.s.n}. ПКМ для переезда.`, '#fff'); }
+  else if (selUnit && units.includes(selUnit)) { selUnit.tx = mx; selUnit.ty = my; log(`${selUnit.s.n} меняет позицию!`, '#0cf'); selUnit = null; }
+};
+
+function spawn() {
+  const alive = bases.filter(b => b.hp > 0);
+  if (!alive.length) { if (!over) { over = true; log('СЕКТОР ПАЛ! F5 — РЕСТАРТ.', '#f33'); } return; }
+  const side = Math.floor(Math.random()*4);
+  let x = side===1?w+20:side===3?-20:Math.random()*w, y = side===0?-20:side===2?h+20:Math.random()*h;
+  let pool = ['uav', 'mol']; if (phase >= 2) pool.push('kr','ger1'); if (phase >= 3) pool.push('ss','ger2'); if (phase >= 4) pool.push('isk');
+  const cfgs = {
+    uav:  { name:'БПЛА', spd:.36, rew:35, dmg:15, col:'#fa0', st:.85, drone:1, heavy:0 },
+    mol:  { name:'Молния', spd:.58, rew:50, dmg:20, col:'#ff4', st:.80, hunt:'civil', drone:1, heavy:0 },
+    ger1: { name:'Герань-1', spd:.45, rew:60, dmg:25, col:'#cf0', st:.9, hunt:'rls', miss:.30, drone:1, heavy:0 },
+    ger2: { name:'Герань-2', spd:.50, rew:85, dmg:30, col:'#f0a', st:.9, hunt:'pvo', miss:.20, drone:1, heavy:0 },
+    kr:   { name:'Кр.Ракета', spd:.56, rew:75, dmg:30, col:'#f70', st:1, drone:0, heavy:0 },
+    ss:   { name:'Storm Shadow', spd:.68, rew:130, dmg:45, col:'#f33', st:.65, wob:1, drone:0, heavy:1 },
+    isk:  { name:'Искандер', spd:1.10, rew:220, dmg:75, col:'#d0f', st:1.35, drone:0, heavy:1 }
+  };
+  const cfg = cfgs[pool[Math.floor(Math.random()*pool.length)]];
+  let tgt = alive[Math.floor(Math.random()*alive.length)];
+  if (cfg.hunt === 'rls') { const r = units.filter(u => u.s.rad || u.s.ew); if (r.length) tgt = r[Math.floor(Math.random()*r.length)]; }
+  else if (cfg.hunt === 'pvo') { const p = units.filter(u => !u.s.rad && !u.s.ew); if (p.length) tgt = p[Math.floor(Math.random()*p.length)]; }
+  else if (cfg.hunt === 'civil') {
+    const civTargets = [...towns]; const npz = bases.find(b => b.isRefinery && b.hp > 0);
+    if (npz) civTargets.push(npz); tgt = civTargets[Math.floor(Math.random()*civTargets.length)];
+  }
+  const tx = tgt.u ? tgt.x : tgt.x*w, ty = tgt.u ? tgt.y : tgt.y*h, a = Math.atan2(ty - y, tx - x);
+  foes.push({ x, y, vx:Math.cos(a)*cfg.spd, vy:Math.sin(a)*cfg.spd, ...cfg, hp:1, tgt, wAng:0, lock:0, vis:0, jam:0, crash:0 });
+}
+
+const aim = (s, t, spd) => { const dt = Math.hypot(t.x-s.x, t.y-s.y)/spd; return Math.atan2(t.y+t.vy*dt-s.y, t.x+t.vx*dt-s.x); };
+function loop() {
+  const npz = bases.find(b => b.isRefinery);
+  if (!over && npz && npz.hp > 0 && ++incomeTick >= 600) { incomeTick = 0; money += 40; log('НПЗ: Поставка (+40)', '#0f6'); }
+  bases.forEach(b => { if (b.rep > 0 && --b.rep === 0) { b.hp = 100; log(`ВОССТАНОВЛЕНО: ${b.n} (100%)!`, '#0f6'); } });
+  units.forEach(u => {
+    const d = Math.hypot(u.tx - u.x, u.ty - u.y);
+    if (d > 2) { u.moving = 1; const a = Math.atan2(u.ty - u.y, u.tx - u.x); u.x += Math.cos(a) * 0.9; u.y += Math.sin(a) * 0.9; }
+    else u.moving = 0;
+  });
+
+  let nPh = kills < 15 ? 1 : kills < 35 ? 2 : kills < 60 ? 3 : 4;
+  if (nPh > phase) { phase = nPh; document.getElementById('ph').textContent = phase; log(`ВНИМАНИЕ: Фаза ${phase}!`, '#f33'); }
+  if (!over && --timer <= 0) { spawn(); timer = Math.max(100, 260 - Math.floor(kills * 1.5)); }
+
+  foes.forEach(f => {
+    if (f.vis > 0) f.vis--;
+    units.forEach(u => {
+      if (u.moving) return;
+      const d = Math.hypot(f.x - u.x, f.y - u.y);
+      if (d <= u.s.r * f.st) f.vis = 35;
+      if (u.s.ew && f.drone && !f.jam && d <= u.s.r) {
+        f.jam = 1; f.vis = 60;
+        if (Math.random() < 0.25) { f.hp = 0; money += f.rew; kills++; booms.push({ x:f.x, y:f.y, r:3, al:1 }); log(`РЭБ: Уничтожен ${f.name} (+${f.rew})`, '#d0f'); }
+        else { f.crash = 120; const ba = Math.atan2(f.vy, f.vx) + (Math.random() > 0.5 ? 1.3 : -1.3); f.vx = Math.cos(ba) * f.spd; f.vy = Math.sin(ba) * f.spd; log(`РЭБ: Сбит курс ${f.name}...`, '#0cf'); }
+      }
+    });
+  });
+
+  for (let i = foes.length-1; i >= 0; i--) {
+    const f = foes[i]; if (f.hp <= 0) { foes.splice(i,1); continue; }
+    if (f.crash > 0) {
+      f.x += f.vx; f.y += f.vy;
+      if (--f.crash <= 0) { booms.push({ x:f.x, y:f.y, r:4, al:1 }); log(`${f.name} врезалась в землю!`, '#0f6'); foes.splice(i,1); }
+      continue;
+    }
+    if (f.tgt.u && !units.includes(f.tgt)) { const a = bases.filter(b => b.hp > 0); if (a.length) f.tgt = a; }
+    const tx = f.tgt.u ? f.tgt.x : f.tgt.x*w, ty = f.tgt.u ? f.tgt.y : f.tgt.y*h;
+    let a = Math.atan2(ty-f.y, tx-f.x);
+    if (f.wob) { f.wAng += .05; a += Math.sin(f.wAng)*.35; }
+    f.vx = Math.cos(a)*f.spd; f.vy = Math.sin(a)*f.spd; f.x += f.vx; f.y += f.vy;
+
+    if (Math.hypot(tx-f.x, ty-f.y) < 14) {
+      if (f.tgt.isTown) { booms.push({ x:f.x, y:f.y, r:5, al:1, hit:1 }); money = Math.max(0, money - 70); log(`УДАР МОЛНИИ: ${f.tgt.n} (-70)!`, '#f33'); }
+      else if (!f.tgt.u && f.tgt.isRefinery && f.tgt.hasNet && f.drone && Math.random() < 0.50) { booms.push({ x:f.x, y:f.y, r:4, al:1 }); log(`СЕТКА НПЗ: ${f.name} отбита!`, '#fa0'); }
+      else if (f.miss && Math.random() < f.miss) { booms.push({ x:f.x+(Math.random()*30-15), y:f.y+(Math.random()*30-15), r:4, al:1 }); log(`ПРОМАХ: ${f.name} мимо!`, '#0f6'); }
+      else {
+        booms.push({ x:f.x, y:f.y, r:5, al:1, hit:1 });
+        if (f.tgt.u) { if (selUnit === f.tgt) selUnit = null; const idx = units.indexOf(f.tgt); if (idx !== -1) { units.splice(idx, 1); log(`ПОТЕРЯ: ${f.tgt.s.n} (${f.name})!`, '#f33'); } }
+        else { f.tgt.hp = Math.max(0, f.tgt.hp - f.dmg); if (f.tgt.rep > 0) { f.tgt.rep = 0; log(`СБРОС РЕМОНТА на ${f.tgt.n}!`, '#f33'); } log(`ПРИЛЁТ ${f.name}: ${f.tgt.n} (-${f.dmg}%)`, '#f33'); }
+      }
+      foes.splice(i,1);
+    }
+  }
+
+  units.forEach(u => {
+    if (u.s.rad || u.s.ew || u.moving) return;
+    if (u.re > 0) { if (--u.re === 0) { u.ammo = u.s.max; log(`${u.s.n} заряжен`, '#0f6'); } return; }
+    if (u.cd > 0) return u.cd--;
+    let best = null, md = u.s.r;
+    foes.forEach(f => { if (f.heavy && !u.s.heavy) return; const d = Math.hypot(f.x-u.x, f.y-u.y); if (f.vis > 0 && !f.crash && f.lock < f.hp && d <= md) { md = d; best = f; } });
+    if (best && money >= u.s.sc) {
+      money -= u.s.sc; u.cd = u.s.cd; u.ammo--; best.lock++; const a = aim(u, best, u.s.spd);
+      shots.push({ x:u.x, y:u.y, vx:Math.cos(a)*u.s.spd, vy:Math.sin(a)*u.s.spd, spd:u.s.spd, tgt:best, life:240, col:u.s.col });
+      if (u.ammo <= 0) { u.re = u.s.rearm; log(`${u.s.n} перезарядка`, '#fa0'); }
+    }
+  });
+
+  for (let i = shots.length-1; i >= 0; i--) {
+    const m = shots[i]; if (--m.life <= 0) { shots.splice(i,1); continue; }
+    if (foes.includes(m.tgt)) {
+      const a = aim(m, m.tgt, m.spd); m.vx = Math.cos(a)*m.spd; m.vy = Math.sin(a)*m.spd;
+      if (Math.hypot(m.tgt.x-m.x, m.tgt.y-m.y) < 12) {
+        booms.push({ x:m.x, y:m.y, r:2, al:1 });
+        towns.forEach(tw => { if (Math.hypot(m.x - tw.x*w, m.y - tw.y*h) < tw.r) { money = Math.max(0, money - 50); log(`УЩЕРБ: ${tw.n} (-50)`, '#fa0'); } });
+        if (--m.tgt.hp <= 0) { money += m.tgt.rew; kills++; log(`Сбит ${m.tgt.name} (+${m.tgt.rew})`, '#0f6'); foes.splice(foes.indexOf(m.tgt),1); }
+        shots.splice(i,1); continue;
+      }
+    }
+    m.x += m.vx; m.y += m.vy;
+  }
+
+  document.getElementById('m').textContent = money; document.getElementById('k').textContent = kills;
+  ['rls','reb','zrpk','zrk'].forEach((k,i) => document.getElementById('c'+i).textContent = `${units.filter(u=>u.s.k===k).length}/${SPECS[k].lim}`);
+  document.getElementById('bases').innerHTML = bases.map(b => `<div>${b.n}: <b style="color:${b.hp>50?'#0f6':'#f33'}">${b.hp}%</b>${b.rep>0?` <span style="color:#0cf">[${Math.ceil(b.rep/60)}с]</span>`:''}</div>`).join('');
+
+  ctx.fillStyle = '#060a08'; ctx.fillRect(0,0,w,h);
+  ctx.strokeStyle = '#0a1f29'; ctx.lineWidth = 18; ctx.beginPath(); ctx.moveTo(0, h*.45); ctx.bezierCurveTo(w*.35, h*.55, w*.65, h*.35, w, h*.55); ctx.stroke();
+  ctx.fillStyle = '#091710'; forests.forEach(fr => { ctx.beginPath(); ctx.arc(fr.x*w, fr.y*h, fr.r, 0, 6.28); ctx.fill(); });
+  ctx.strokeStyle = '#0e1d15'; ctx.lineWidth = 1;
+  for (let x=0; x<w; x+=40) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke(); }
+  for (let y=0; y<h; y+=40) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke(); }
+
+  towns.forEach(tw => {
+    ctx.strokeStyle = 'rgba(255,170,0,0.25)'; ctx.beginPath(); ctx.arc(tw.x*w, tw.y*h, tw.r, 0, 6.28); ctx.stroke();
+    ctx.fillStyle = '#687'; ctx.font = '10px Consolas'; ctx.fillText(tw.n, tw.x*w - 25, tw.y*h + 4);
+  });
+
+  ctx.strokeStyle = 'rgba(0,255,102,0.25)'; ctx.beginPath(); ctx.arc(mx,my,SPECS[type].r,0,6.28); ctx.stroke();
+  bases.forEach(b => {
+    const bx = b.x*w, by = b.y*h;
+    ctx.strokeStyle = b.hp>0?'#0f6':'#f33'; ctx.lineWidth = 2; ctx.strokeRect(bx-10,by-10,20,20); ctx.lineWidth = 1;
+    if (b.hasNet && b.hp > 0) { ctx.strokeStyle = '#fa0'; ctx.strokeRect(bx-15,by-15,30,30); }
+    ctx.fillStyle='#0f6'; ctx.font = '11px Consolas'; ctx.fillText(`${b.n} ${b.hp}%`,bx-25,by+24);
+    if (b.rep > 0) { ctx.fillStyle = '#0cf'; ctx.fillText(`РЕМ: ${Math.ceil(b.rep/60)}с`, bx-25, by-15); }
+  });
+  units.forEach(u => {
+    if (u.moving) { ctx.strokeStyle = 'rgba(0,204,255,0.4)'; ctx.beginPath(); ctx.moveTo(u.x,u.y); ctx.lineTo(u.tx,u.ty); ctx.stroke(); }
+    else { ctx.strokeStyle = u.re?'rgba(255,170,0,.2)':u.s.rad?'rgba(0,255,255,.15)':u.s.ew?'rgba(221,0,255,.2)':'rgba(0,255,102,.2)'; ctx.beginPath(); ctx.arc(u.x,u.y,u.s.r,0,6.28); ctx.stroke(); }
+    if (selUnit === u) { ctx.strokeStyle = '#fff'; ctx.beginPath(); ctx.arc(u.x,u.y,10,0,6.28); ctx.stroke(); }
+    ctx.fillStyle = u.moving?'#fff':u.re?'#fa0':u.s.col; ctx.beginPath(); ctx.arc(u.x,u.y,5,0,6.28); ctx.fill();
+    ctx.fillText(u.moving?'В ПУТИ':u.s.rad?'РЛС':u.s.ew?'РЭБ':(u.re?'ПЕРЕЗАР.':`БК:${u.ammo}`), u.x-18, u.y-10);
+  });
+  foes.forEach(f => {
+    if (f.vis <= 0) return; ctx.globalAlpha = Math.min(1, f.vis / 25); ctx.fillStyle = f.col;
+    ctx.beginPath(); ctx.arc(f.x,f.y,4,0,6.28); ctx.fill(); ctx.fillText(f.name + (f.crash?' [СБОЙ]':''), f.x+7, f.y+3); ctx.globalAlpha = 1;
+  });
+  shots.forEach(m => { ctx.strokeStyle = m.col; ctx.beginPath(); ctx.moveTo(m.x,m.y); ctx.lineTo(m.x-m.vx*3,m.y-m.vy*3); ctx.stroke(); });
+  for (let i=booms.length-1; i>=0; i--) {
+    const b = booms[i]; b.r+=1.5; b.al-=.04; ctx.strokeStyle = b.hit?`rgba(255,51,51,${b.al})`:`rgba(0,255,102,${b.al})`;
+    ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,6.28); ctx.stroke(); if (b.al<=0) booms.splice(i,1);
+  }
+  requestAnimationFrame(loop);
+}
+log('Фаза 1: Разведка БПЛА. ПКМ по расчёту — смена позиции.', '#0f6'); loop();
+</script>
+</body>
+</html>
